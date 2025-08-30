@@ -1,12 +1,11 @@
 import 'dart:convert';
-import 'dart:ui' show Rect, Offset;
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:maplibre_gl/maplibre_gl.dart';
 import 'package:http/http.dart' as http;
 
 // MapTiler（ベクタースタイル）。あなたのキーに差し替え可
-const STYLE_URL =
+const styleUrl =
     'https://api.maptiler.com/maps/streets-v2/style.json?key=fdAxUaT0DqfPmcAahF3V';
 
 class MapScreen extends StatefulWidget {
@@ -36,7 +35,7 @@ class _MapScreenState extends State<MapScreen> {
     return Scaffold(
       appBar: AppBar(title: const Text('建物＋昼夜 判定')),
       body: MapLibreMap(
-        styleString: STYLE_URL,
+        styleString: styleUrl,
         initialCameraPosition: const CameraPosition(
           target: LatLng(35.681236, 139.767125), // 東京駅
           zoom: 17,

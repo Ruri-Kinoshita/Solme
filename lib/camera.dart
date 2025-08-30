@@ -2,10 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 import 'package:solme/providers/photo_provider.dart';
 
 class PhotoPage extends ConsumerStatefulWidget {
-  const PhotoPage({Key? key}) : super(key: key);
+  const PhotoPage({super.key});
 
   @override
   ConsumerState<PhotoPage> createState() => _PhotoPageState();
@@ -71,7 +72,7 @@ class _PhotoPageState extends ConsumerState<PhotoPage> {
       ref.read(capturedPhotoProvider.notifier).state = image;
 
       if (!mounted) return;
-      //context.push('/create'); // 遷移先はルート定義に合わせて
+      context.push('/concept'); // 遷移先はルート定義に合わせて
     } catch (e) {
       debugPrint('撮影失敗: $e');
       if (!mounted) return;
@@ -84,7 +85,7 @@ class _PhotoPageState extends ConsumerState<PhotoPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Color(0),
+      backgroundColor: const Color(0x00000000),
       body: Stack(
         children: [
           if (_isCameraInitialized)
@@ -101,7 +102,7 @@ class _PhotoPageState extends ConsumerState<PhotoPage> {
                     ),
                   ),
                 ),
-                Positioned(
+                const Positioned(
                   top: 100,
                   left: 20,
                   right: 0,
@@ -111,7 +112,7 @@ class _PhotoPageState extends ConsumerState<PhotoPage> {
                       Text(
                         "アイコンを生成するため写真を撮ります",
                         style: TextStyle(
-                          color: Color(0),
+                          color: Color(0x00000000),
                           fontSize: 13,
                           fontWeight: FontWeight.bold,
                         ),
@@ -119,7 +120,7 @@ class _PhotoPageState extends ConsumerState<PhotoPage> {
                       Text(
                         "丸枠に顔を収めてください",
                         style: TextStyle(
-                          color: Color(0),
+                          color: Color(0x00000000),
                           fontSize: 13,
                           fontWeight: FontWeight.bold,
                         ),
