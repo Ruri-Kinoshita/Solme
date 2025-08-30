@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:solme/check_in_building.dart';
 
 import 'package:solme/router.dart';
 

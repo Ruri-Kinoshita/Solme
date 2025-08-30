@@ -3,6 +3,7 @@ import 'package:go_router/go_router.dart';
 import 'package:solme/beforecamera.dart';
 import 'package:solme/bunsin.dart';
 import 'package:solme/camera.dart';
+import 'package:solme/check_in_building.dart';
 import 'package:solme/concept.dart';
 import 'package:solme/home.dart';
 
@@ -17,7 +18,8 @@ final goRouter = GoRouter(
       pageBuilder: (context, state) {
         return MaterialPage(
           key: state.pageKey,
-          child: const BeforeCameraPage(),
+          child: MapScreen(),
+          //child: const BeforeCameraPage(),
         );
       },
     ),
