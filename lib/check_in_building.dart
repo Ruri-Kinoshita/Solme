@@ -1,23 +1,26 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
+import 'dart:ui';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:geolocator/geolocator.dart';
-import 'package:maplibre_gl/maplibre_gl.dart';
 import 'package:http/http.dart' as http;
+import 'package:maplibre_gl/maplibre_gl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:solme/providers/irast_provider.dart';
 
 // MapTiler（ベクタースタイル）。あなたのキーに差し替え可
 const styleUrl =
     'https://api.maptiler.com/maps/streets-v2/style.json?key=fdAxUaT0DqfPmcAahF3V';
 
-class MapScreen extends StatefulWidget {
+class MapScreen extends ConsumerStatefulWidget {
   const MapScreen({super.key});
   @override
-  State<MapScreen> createState() => _MapScreenState();
+  ConsumerState<MapScreen> createState() => _MapScreenState();
 }
 
-class _MapScreenState extends State<MapScreen> {
+class _MapScreenState extends ConsumerState<MapScreen> {
   MapLibreMapController? _map;
   bool _styleReady = false;
   bool _busyUi = false; // 手動チェック時のUIローディング
@@ -41,6 +44,24 @@ class _MapScreenState extends State<MapScreen> {
   Duration _activeDuration = Duration.zero; // 条件成立時間の累計
   bool _isMeasuring = false;
 
+  // ランク判定フラグ（当日一度きり適用）
+  static const _prefsKeyApplied11 = 'applied_11';
+  static const _prefsKeyApplied15 = 'applied_15';
+  static const _prefsKeyAppliedSunset = 'applied_sunset';
+  bool _applied11 = false;
+  bool _applied15 = false;
+  bool _appliedSunset = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // Riverpod: 当日のランクをロード & 判定フラグをロード
+    Future.microtask(() async {
+      await ref.read(imageRankProvider.notifier).loadToday();
+      await _loadRankFlagsForToday();
+    });
+  }
+
   @override
   void dispose() {
     _pollTimer?.cancel();
@@ -49,6 +70,8 @@ class _MapScreenState extends State<MapScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final rank = ref.watch(imageRankProvider); // 0〜4
+    final imagePaths = ref.watch(imagePathsProvider);
     final isCondition = _isDay == true && _onBuilding == false;
 
     return Scaffold(
@@ -169,6 +192,34 @@ class _MapScreenState extends State<MapScreen> {
               ),
             ),
           ),
+          // 右上：今日のランクと画像
+          Positioned(
+            right: 12,
+            top: 12,
+            child: Card(
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.all(10),
+                child: Column(
+                  children: [
+                    const Text('今日のランク', style: TextStyle(fontSize: 12)),
+                    Text('$rank',
+                        style: const TextStyle(
+                            fontSize: 24, fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 8),
+                    Image.asset(
+                      imagePaths[rank], // ランク1なら assets/image/img1.png
+                      width: 96,
+                      height: 96,
+                      fit: BoxFit.cover,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
         ],
       ),
     );
@@ -223,6 +274,11 @@ class _MapScreenState extends State<MapScreen> {
     _activeDuration = Duration.zero;
     _lastPollAt = null;
     await _saveTodayToPrefs();
+
+    // 当日のランクとフラグもリセット
+    await ref.read(imageRankProvider.notifier).loadToday();
+    await _resetRankFlagsForToday();
+
     if (mounted) setState(() {});
   }
 
@@ -272,6 +328,9 @@ class _MapScreenState extends State<MapScreen> {
       _activeDuration += delta;
       await _saveTodayToPrefs();
     }
+
+    // ランクの適用（11:00/15:00/日の入り）— 当日一度だけ
+    await _maybeApplyRankRules(DateTime.now());
 
     if (mounted) setState(() {});
   }
@@ -352,6 +411,81 @@ class _MapScreenState extends State<MapScreen> {
     } else {
       _isDay = null;
     }
+  }
+
+  /// ------- ランク判定（11:00 / 15:00 / 日の入り） -------
+  Future<void> _maybeApplyRankRules(DateTime now) async {
+    final rankNotifier = ref.read(imageRankProvider.notifier);
+
+    // 11:00：一度も浴びてなければ 3→2（最低でも2へ丸め）
+    final eleven = DateTime(now.year, now.month, now.day, 11, 0, 0);
+    if (!_applied11 && now.isAfter(eleven)) {
+      final activeMs = _activeDuration.inMilliseconds;
+      if (activeMs == 0) {
+        await rankNotifier.setToAtMost(2);
+      }
+      _applied11 = true;
+      await _saveRankFlags();
+    }
+
+    // 15:00：0秒→3→1、1秒〜14:59→3→2（最低到達ランクに丸め）
+    final fifteen = DateTime(now.year, now.month, now.day, 15, 0, 0);
+    if (!_applied15 && now.isAfter(fifteen)) {
+      final activeMs = _activeDuration.inMilliseconds;
+      if (activeMs == 0) {
+        await rankNotifier.setToAtMost(1);
+      } else if (activeMs > 0 &&
+          activeMs < const Duration(minutes: 15).inMilliseconds) {
+        await rankNotifier.setToAtMost(2);
+      }
+      _applied15 = true;
+      await _saveRankFlags();
+    }
+
+    // 日の入り：15分以上浴びていれば +1（上限4）
+    if (_sunsetLocal != null && !_appliedSunset && now.isAfter(_sunsetLocal!)) {
+      if (_activeDuration >= const Duration(minutes: 15)) {
+        await rankNotifier.bumpUpOnce();
+      }
+      _appliedSunset = true;
+      await _saveRankFlags();
+    }
+  }
+
+  /// ------- ランク判定フラグ（当日切替に対応） -------
+  Future<void> _loadRankFlagsForToday() async {
+    final prefs = await SharedPreferences.getInstance();
+    final ymd = _todayYmd();
+    final savedYmd = prefs.getString('${_prefsKeyApplied11}_ymd');
+    if (savedYmd == ymd) {
+      _applied11 = prefs.getBool(_prefsKeyApplied11) ?? false;
+      _applied15 = prefs.getBool(_prefsKeyApplied15) ?? false;
+      _appliedSunset = prefs.getBool(_prefsKeyAppliedSunset) ?? false;
+    } else {
+      _applied11 = _applied15 = _appliedSunset = false;
+      await prefs.setString('${_prefsKeyApplied11}_ymd', ymd);
+      await prefs.setBool(_prefsKeyApplied11, false);
+      await prefs.setBool(_prefsKeyApplied15, false);
+      await prefs.setBool(_prefsKeyAppliedSunset, false);
+    }
+  }
+
+  Future<void> _resetRankFlagsForToday() async {
+    final prefs = await SharedPreferences.getInstance();
+    final ymd = _todayYmd();
+    await prefs.setString('${_prefsKeyApplied11}_ymd', ymd);
+    _applied11 = _applied15 = _appliedSunset = false;
+    await prefs.setBool(_prefsKeyApplied11, false);
+    await prefs.setBool(_prefsKeyApplied15, false);
+    await prefs.setBool(_prefsKeyAppliedSunset, false);
+  }
+
+  Future<void> _saveRankFlags() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('${_prefsKeyApplied11}_ymd', _todayYmd());
+    await prefs.setBool(_prefsKeyApplied11, _applied11);
+    await prefs.setBool(_prefsKeyApplied15, _applied15);
+    await prefs.setBool(_prefsKeyAppliedSunset, _appliedSunset);
   }
 
   /// ---------------------------
