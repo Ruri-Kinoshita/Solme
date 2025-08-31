@@ -6,6 +6,8 @@ import 'package:solme/camera.dart';
 import 'package:solme/check_in_building.dart';
 import 'package:solme/concept.dart';
 import 'package:solme/home.dart';
+import 'package:solme/home_high.dart';
+import 'package:solme/home_low.dart';
 
 final goRouter = GoRouter(
   // アプリが起動した時
@@ -60,6 +62,26 @@ final goRouter = GoRouter(
         return MaterialPage(
           key: state.pageKey,
           child: const HomePage(),
+        );
+      },
+    ),
+    GoRoute(
+      path: '/home_low',
+      name: 'home_low',
+      pageBuilder: (context, state) {
+        return MaterialPage(
+          key: state.pageKey,
+          child: const HomePage_Low(),
+        );
+      },
+    ),
+    GoRoute(
+      path: '/home_high',
+      name: 'home_high',
+      pageBuilder: (context, state) {
+        return MaterialPage(
+          key: state.pageKey,
+          child: const HomePage_High(),
         );
       },
     ),
