@@ -1,95 +1,338 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
+import 'dart:ui';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:geolocator/geolocator.dart';
-import 'package:maplibre_gl/maplibre_gl.dart';
 import 'package:http/http.dart' as http;
+import 'package:maplibre_gl/maplibre_gl.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:solme/providers/irast_provider.dart';
 
 // MapTiler（ベクタースタイル）。あなたのキーに差し替え可
 const styleUrl =
     'https://api.maptiler.com/maps/streets-v2/style.json?key=fdAxUaT0DqfPmcAahF3V';
 
-class MapScreen extends StatefulWidget {
+class MapScreen extends ConsumerStatefulWidget {
   const MapScreen({super.key});
   @override
-  State<MapScreen> createState() => _MapScreenState();
+  ConsumerState<MapScreen> createState() => _MapScreenState();
 }
 
-class _MapScreenState extends State<MapScreen> {
+class _MapScreenState extends ConsumerState<MapScreen> {
   MapLibreMapController? _map;
-  String _status = '—';
-  bool _busy = false;
   bool _styleReady = false;
+  bool _busyUi = false; // 手動チェック時のUIローディング
 
-  /// ログで判明したレイヤーIDに合わせて固定
+  /// ログで判明したレイヤーIDに合わせて固定（必要に応じて調整）
   static const List<String> _buildingLayerIds = ['Building', 'Building 3D'];
 
   // 日の出/日の入り（ローカル時刻）
   DateTime? _sunriseLocal;
   DateTime? _sunsetLocal;
+  LatLng? _sunCacheAt; // どの座標で取得したか（おおよその距離監視用）
+  DateTime? _sunCacheDate; // どの日付のキャッシュか
+
+  // 条件: 「建物の外」かつ「昼」
   bool? _isDay; // true=昼, false=夜, null=未取得
+  bool? _onBuilding; // true=建物の上, false=建物以外, null=未取得
+
+  // 計測（自動）
+  Timer? _pollTimer;
+  DateTime? _lastPollAt;
+  Duration _activeDuration = Duration.zero; // 条件成立時間の累計
+  bool _isMeasuring = false;
+
+  // ランク判定フラグ（当日一度きり適用）
+  static const _prefsKeyApplied11 = 'applied_11';
+  static const _prefsKeyApplied15 = 'applied_15';
+  static const _prefsKeyAppliedSunset = 'applied_sunset';
+  bool _applied11 = false;
+  bool _applied15 = false;
+  bool _appliedSunset = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // Riverpod: 当日のランクをロード & 判定フラグをロード
+    Future.microtask(() async {
+      await ref.read(imageRankProvider.notifier).loadToday();
+      await _loadRankFlagsForToday();
+    });
+  }
+
+  @override
+  void dispose() {
+    _pollTimer?.cancel();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
-    final buttonsDisabled = _busy || !_styleReady;
+    final rank = ref.watch(imageRankProvider); // 0〜4
+    final imagePaths = ref.watch(imagePathsProvider);
+    final isCondition = _isDay == true && _onBuilding == false;
 
     return Scaffold(
-      appBar: AppBar(title: const Text('建物＋昼夜 判定')),
-      body: MapLibreMap(
-        styleString: styleUrl,
-        initialCameraPosition: const CameraPosition(
-          target: LatLng(35.681236, 139.767125), // 東京駅
-          zoom: 17,
-        ),
-        myLocationEnabled: true,
-        myLocationRenderMode: MyLocationRenderMode.normal,
-        onMapCreated: (c) => _map = c,
-        onStyleLoadedCallback: () => setState(() => _styleReady = true),
-      ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: buttonsDisabled ? null : _handleCheck,
-        label: Text(_busy ? '判定中…' : (_status == '—' ? '判定する' : _status)),
+      appBar: AppBar(title: const Text('建物の外×昼 の計測')),
+      body: Stack(
+        children: [
+          MapLibreMap(
+            styleString: styleUrl,
+            initialCameraPosition: const CameraPosition(
+              target: LatLng(35.681236, 139.767125), // 東京駅
+              zoom: 17,
+            ),
+            myLocationEnabled: true,
+            myLocationRenderMode: MyLocationRenderMode.normal,
+            onMapCreated: (c) => _map = c,
+            onStyleLoadedCallback: () => setState(() => _styleReady = true),
+          ),
+          SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _InfoChip(
+                    icon: Icons.wb_sunny_outlined,
+                    label: _isDay == null
+                        ? '昼夜: 未判定'
+                        : _isDay!
+                            ? '昼'
+                            : '夜',
+                    color: _isDay == true
+                        ? Colors.orange
+                        : _isDay == false
+                            ? Colors.indigo
+                            : Colors.grey,
+                  ),
+                  const SizedBox(height: 8),
+                  _InfoChip(
+                    icon: Icons.apartment_outlined,
+                    label: _onBuilding == null
+                        ? '建物: 未判定'
+                        : _onBuilding!
+                            ? '建物の上'
+                            : '建物以外',
+                    color: _onBuilding == false
+                        ? Colors.green
+                        : _onBuilding == true
+                            ? Colors.red
+                            : Colors.grey,
+                  ),
+                  const SizedBox(height: 12),
+                  Card(
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(16)),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 16, vertical: 14),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text('条件成立の累計時間',
+                              style: TextStyle(fontSize: 14)),
+                          const SizedBox(height: 6),
+                          Text(
+                            _fmtDuration(_activeDuration),
+                            style: const TextStyle(
+                              fontSize: 36,
+                              fontFeatures: [FontFeature.tabularFigures()],
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            _sunriseLocal != null && _sunsetLocal != null
+                                ? '今日の 日の出 ${_fmtTime(_sunriseLocal!)}, 日の入り ${_fmtTime(_sunsetLocal!)}'
+                                : '日の出/日の入り 未取得',
+                            style: const TextStyle(fontSize: 12),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const Spacer(),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: FilledButton.tonal(
+                          onPressed: _busyUi ? null : _manualCheckOnce,
+                          child: Text(_busyUi ? '判定中…' : '1回だけ判定'),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: FilledButton(
+                          onPressed: !_styleReady
+                              ? null
+                              : (_isMeasuring
+                                  ? _stopMeasurement
+                                  : _startMeasurement),
+                          child: Text(_isMeasuring ? '自動計測 停止' : '自動計測 開始'),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: _resetToday,
+                          icon: const Icon(Icons.restart_alt),
+                          label: const Text('今日の累計をリセット'),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+          // 右上：今日のランクと画像
+          Positioned(
+            right: 12,
+            top: 12,
+            child: Card(
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.all(10),
+                child: Column(
+                  children: [
+                    const Text('今日のランク', style: TextStyle(fontSize: 12)),
+                    Text('$rank',
+                        style: const TextStyle(
+                            fontSize: 24, fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 8),
+                    Image.asset(
+                      imagePaths[rank], // ランク1なら assets/image/img1.png
+                      width: 96,
+                      height: 96,
+                      fit: BoxFit.cover,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
 
-  /// ボタン押下時：現在地で「建物か」「昼/夜か」を判定
-  Future<void> _handleCheck() async {
-    if (_map == null) return;
-    setState(() => _busy = true);
+  /// ---------------------------
+  ///  UI 操作
+  /// ---------------------------
+  Future<void> _manualCheckOnce() async {
+    setState(() => _busyUi = true);
     try {
-      await _ensureLocationPermission();
-      final pos = await Geolocator.getCurrentPosition();
-      final latLng = LatLng(pos.latitude, pos.longitude);
-
-      // カメラを寄せる（ズーム17）
-      await _map!.animateCamera(CameraUpdate.newLatLngZoom(latLng, 17));
-
-      // 昼/夜を取得＆判定
-      await _fetchSunTimes(latLng.latitude, latLng.longitude);
-      final onBuilding = await _isOnBuildingRobust(latLng);
-
-      final hiruYoru = _isDay == null ? '—' : (_isDay! ? '昼' : '夜');
-      setState(() {
-        _status = '${onBuilding ? '建物の上 ✅' : '建物以外 ❌'} ・ $hiruYoru';
-      });
-
-      // 取得した日の出/日の入りをスナックバーで表示
+      await _pollOnce(animateCamera: true);
       if (!mounted) return;
+      final msg =
+          '【${_isDay == true ? '昼' : _isDay == false ? '夜' : '—'} × ${_onBuilding == false ? '建物の外' : _onBuilding == true ? '建物上' : '—'}】';
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            _sunriseLocal != null && _sunsetLocal != null
-                ? '日の出: ${_fmt(_sunriseLocal!)} / 日の入り: ${_fmt(_sunsetLocal!)}（端末のローカル時刻）'
-                : '日の出/日の入りを取得できませんでした',
-          ),
-          duration: const Duration(seconds: 4),
-        ),
+        SnackBar(content: Text('現在の判定: $msg')),
       );
     } catch (e) {
-      setState(() => _status = 'エラー: $e');
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('エラー: $e')),
+      );
     } finally {
-      setState(() => _busy = false);
+      if (mounted) setState(() => _busyUi = false);
     }
+  }
+
+  Future<void> _startMeasurement() async {
+    await _ensureLocationPermission();
+    await _loadTodayFromPrefs();
+    _lastPollAt = null;
+    _isMeasuring = true;
+    setState(() {});
+
+    // 初回実行してから周回
+    unawaited(_pollOnce(animateCamera: false));
+    _pollTimer?.cancel();
+    _pollTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+      unawaited(_pollOnce(animateCamera: false));
+    });
+  }
+
+  void _stopMeasurement() {
+    _pollTimer?.cancel();
+    _isMeasuring = false;
+    _lastPollAt = null;
+    setState(() {});
+  }
+
+  Future<void> _resetToday() async {
+    _activeDuration = Duration.zero;
+    _lastPollAt = null;
+    await _saveTodayToPrefs();
+
+    // 当日のランクとフラグもリセット
+    await ref.read(imageRankProvider.notifier).loadToday();
+    await _resetRankFlagsForToday();
+
+    if (mounted) setState(() {});
+  }
+
+  /// ---------------------------
+  ///  中核ロジック
+  /// ---------------------------
+  Future<void> _pollOnce({required bool animateCamera}) async {
+    if (_map == null || !_styleReady) return;
+    await _ensureLocationPermission();
+
+    // 現在地
+    final pos = await Geolocator.getCurrentPosition();
+    final latLng = LatLng(pos.latitude, pos.longitude);
+
+    // カメラ位置（建物判定は画面座標を使うため、なるべく近辺を表示）
+    if (animateCamera) {
+      await _map!.animateCamera(CameraUpdate.newLatLngZoom(latLng, 17));
+    } else {
+      await _map!.moveCamera(CameraUpdate.newLatLngZoom(latLng, 17));
+    }
+
+    // 昼夜キャッシュの更新（距離>30km または 日付が変わったら再取得）
+    final now = DateTime.now();
+    final needSunFetch = _sunriseLocal == null ||
+        _sunsetLocal == null ||
+        _sunCacheDate == null ||
+        !_isSameYmd(_sunCacheDate!, now) ||
+        (_sunCacheAt == null ? true : _distanceKm(_sunCacheAt!, latLng) > 30.0);
+    if (needSunFetch) {
+      await _fetchSunTimes(latLng.latitude, latLng.longitude);
+      _sunCacheAt = latLng;
+      _sunCacheDate = DateTime(now.year, now.month, now.day);
+    } else {
+      _updateIsDay();
+    }
+
+    // 建物判定
+    _onBuilding = await _isOnBuildingRobust(latLng);
+
+    // 条件成立時間を加算
+    final prevPoll = _lastPollAt ?? now;
+    final delta = now.difference(prevPoll);
+    _lastPollAt = now;
+
+    final condition = (_isDay == true && _onBuilding == false);
+    if (condition) {
+      _activeDuration += delta;
+      await _saveTodayToPrefs();
+    }
+
+    // ランクの適用（11:00/15:00/日の入り）— 当日一度だけ
+    await _maybeApplyRankRules(DateTime.now());
+
+    if (mounted) setState(() {});
   }
 
   /// 中心＋十字の5点・多数決（3/5以上）で建物判定
@@ -133,8 +376,14 @@ class _MapScreenState extends State<MapScreen> {
 
   /// 日の出/日の入りを Sunrise-Sunset API から取得（UTC → ローカルに変換）
   Future<void> _fetchSunTimes(double lat, double lng) async {
+    final local = DateTime.now();
+    final y = local.year.toString().padLeft(4, '0');
+    final m = local.month.toString().padLeft(2, '0');
+    final d = local.day.toString().padLeft(2, '0');
+    final dateStr = '$y-$m-$d'; // 端末ローカル日付で問い合わせ
+
     final uri = Uri.parse(
-      'https://api.sunrise-sunset.org/json?lat=$lat&lng=$lng&date=today&formatted=0',
+      'https://api.sunrise-sunset.org/json?lat=$lat&lng=$lng&date=$dateStr&formatted=0',
     );
     final res = await http.get(uri);
     if (res.statusCode != 200) {
@@ -146,23 +395,144 @@ class _MapScreenState extends State<MapScreen> {
 
     final data = json.decode(res.body) as Map<String, dynamic>;
     final results = data['results'] as Map<String, dynamic>;
-    final sunriseUtc =
-        DateTime.parse(results['sunrise']); // 例: 2025-08-31T20:24:13+00:00
+    final sunriseUtc = DateTime.parse(results['sunrise']);
     final sunsetUtc = DateTime.parse(results['sunset']);
 
     _sunriseLocal = sunriseUtc.toLocal();
     _sunsetLocal = sunsetUtc.toLocal();
 
-    final now = DateTime.now(); // 端末ローカル
-    _isDay = (_sunriseLocal!.isBefore(now) && _sunsetLocal!.isAfter(now));
+    _updateIsDay();
   }
 
-  String _fmt(DateTime dt) {
-    // hh:mm 表示（必要なら intl パッケージでローカライズ）
+  void _updateIsDay() {
+    final now = DateTime.now(); // 端末ローカル
+    if (_sunriseLocal != null && _sunsetLocal != null) {
+      _isDay = (_sunriseLocal!.isBefore(now) && _sunsetLocal!.isAfter(now));
+    } else {
+      _isDay = null;
+    }
+  }
+
+  /// ------- ランク判定（11:00 / 15:00 / 日の入り） -------
+  Future<void> _maybeApplyRankRules(DateTime now) async {
+    final rankNotifier = ref.read(imageRankProvider.notifier);
+
+    // 11:00：一度も浴びてなければ 3→2（最低でも2へ丸め）
+    final eleven = DateTime(now.year, now.month, now.day, 11, 0, 0);
+    if (!_applied11 && now.isAfter(eleven)) {
+      final activeMs = _activeDuration.inMilliseconds;
+      if (activeMs == 0) {
+        await rankNotifier.setToAtMost(2);
+      }
+      _applied11 = true;
+      await _saveRankFlags();
+    }
+
+    // 15:00：0秒→3→1、1秒〜14:59→3→2（最低到達ランクに丸め）
+    final fifteen = DateTime(now.year, now.month, now.day, 15, 0, 0);
+    if (!_applied15 && now.isAfter(fifteen)) {
+      final activeMs = _activeDuration.inMilliseconds;
+      if (activeMs == 0) {
+        await rankNotifier.setToAtMost(1);
+      } else if (activeMs > 0 &&
+          activeMs < const Duration(minutes: 15).inMilliseconds) {
+        await rankNotifier.setToAtMost(2);
+      }
+      _applied15 = true;
+      await _saveRankFlags();
+    }
+
+    // 日の入り：15分以上浴びていれば +1（上限4）
+    if (_sunsetLocal != null && !_appliedSunset && now.isAfter(_sunsetLocal!)) {
+      if (_activeDuration >= const Duration(minutes: 15)) {
+        await rankNotifier.bumpUpOnce();
+      }
+      _appliedSunset = true;
+      await _saveRankFlags();
+    }
+  }
+
+  /// ------- ランク判定フラグ（当日切替に対応） -------
+  Future<void> _loadRankFlagsForToday() async {
+    final prefs = await SharedPreferences.getInstance();
+    final ymd = _todayYmd();
+    final savedYmd = prefs.getString('${_prefsKeyApplied11}_ymd');
+    if (savedYmd == ymd) {
+      _applied11 = prefs.getBool(_prefsKeyApplied11) ?? false;
+      _applied15 = prefs.getBool(_prefsKeyApplied15) ?? false;
+      _appliedSunset = prefs.getBool(_prefsKeyAppliedSunset) ?? false;
+    } else {
+      _applied11 = _applied15 = _appliedSunset = false;
+      await prefs.setString('${_prefsKeyApplied11}_ymd', ymd);
+      await prefs.setBool(_prefsKeyApplied11, false);
+      await prefs.setBool(_prefsKeyApplied15, false);
+      await prefs.setBool(_prefsKeyAppliedSunset, false);
+    }
+  }
+
+  Future<void> _resetRankFlagsForToday() async {
+    final prefs = await SharedPreferences.getInstance();
+    final ymd = _todayYmd();
+    await prefs.setString('${_prefsKeyApplied11}_ymd', ymd);
+    _applied11 = _applied15 = _appliedSunset = false;
+    await prefs.setBool(_prefsKeyApplied11, false);
+    await prefs.setBool(_prefsKeyApplied15, false);
+    await prefs.setBool(_prefsKeyAppliedSunset, false);
+  }
+
+  Future<void> _saveRankFlags() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('${_prefsKeyApplied11}_ymd', _todayYmd());
+    await prefs.setBool(_prefsKeyApplied11, _applied11);
+    await prefs.setBool(_prefsKeyApplied15, _applied15);
+    await prefs.setBool(_prefsKeyAppliedSunset, _appliedSunset);
+  }
+
+  /// ---------------------------
+  ///  永続化（当日分のみ）
+  /// ---------------------------
+  static const _prefsKeyMillis = 'outdoor_day_millis';
+  static const _prefsKeyDate = 'outdoor_day_ymd';
+
+  Future<void> _loadTodayFromPrefs() async {
+    final prefs = await SharedPreferences.getInstance();
+    final ymd = _todayYmd();
+    final savedYmd = prefs.getString(_prefsKeyDate);
+    if (savedYmd == ymd) {
+      final ms = prefs.getInt(_prefsKeyMillis) ?? 0;
+      _activeDuration = Duration(milliseconds: ms);
+    } else {
+      _activeDuration = Duration.zero; // 日付が変わっていればクリア
+      await prefs.setString(_prefsKeyDate, ymd);
+      await prefs.setInt(_prefsKeyMillis, 0);
+    }
+  }
+
+  Future<void> _saveTodayToPrefs() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_prefsKeyDate, _todayYmd());
+    await prefs.setInt(_prefsKeyMillis, _activeDuration.inMilliseconds);
+  }
+
+  String _todayYmd() {
+    final now = DateTime.now();
+    return '${now.year.toString().padLeft(4, '0')}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
+  }
+
+  /// ---------------------------
+  ///  ユーティリティ
+  /// ---------------------------
+  String _fmtTime(DateTime dt) {
     final hh = dt.hour.toString().padLeft(2, '0');
     final mm = dt.minute.toString().padLeft(2, '0');
     return '$hh:$mm';
-    // 秒まで見たい場合: '${dt.hour}:${dt.minute}:${dt.second}'
+  }
+
+  String _fmtDuration(Duration d) {
+    final hh = d.inHours;
+    final mm = d.inMinutes.remainder(60);
+    final ss = d.inSeconds.remainder(60);
+    return '${hh.toString().padLeft(2, '0')}:${mm.toString().padLeft(2, '0')}:${ss.toString().padLeft(2, '0')}';
   }
 
   Future<void> _ensureLocationPermission() async {
@@ -178,5 +548,50 @@ class _MapScreenState extends State<MapScreen> {
         p == LocationPermission.denied) {
       throw '位置権限がありません';
     }
+  }
+
+  bool _isSameYmd(DateTime a, DateTime b) =>
+      a.year == b.year && a.month == b.month && a.day == b.day;
+
+  double _distanceKm(LatLng a, LatLng b) {
+    // 簡易ハーサイン
+    const R = 6371.0; // 地球半径(km)
+    final dLat = _deg2rad(b.latitude - a.latitude);
+    final dLon = _deg2rad(b.longitude - a.longitude);
+    final la1 = _deg2rad(a.latitude);
+    final la2 = _deg2rad(b.latitude);
+    final h = math.sin(dLat / 2) * math.sin(dLat / 2) +
+        math.cos(la1) * math.cos(la2) * math.sin(dLon / 2) * math.sin(dLon / 2);
+    final c = 2 * math.atan2(math.sqrt(h), math.sqrt(1 - h));
+    return R * c;
+  }
+
+  double _deg2rad(double d) => d * math.pi / 180.0;
+}
+
+class _InfoChip extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final Color color;
+  const _InfoChip(
+      {required this.icon, required this.label, required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.12),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 16, color: color),
+          const SizedBox(width: 6),
+          Text(label, style: TextStyle(color: color)),
+        ],
+      ),
+    );
   }
 }
