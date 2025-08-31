@@ -91,6 +91,7 @@ class BeforeCameraPage extends StatelessWidget {
                       child: IconButton(
                         iconSize: 36,
                         onPressed: () => context.push('/camera'),
+                        // onPressed: () => context.push('/home'),
                         icon: const Icon(Icons.photo_camera_outlined,
                             color: Colors.amber),
                       ),

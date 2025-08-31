@@ -3,8 +3,8 @@ import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
 import 'package:solme/constant/app_color.dart';
 
-class HomePage extends StatelessWidget {
-  const HomePage({super.key});
+class HomePage_Low extends StatelessWidget {
+  const HomePage_Low({super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -30,11 +30,11 @@ class HomePage extends StatelessWidget {
         toolbarHeight: 100, // ヘッダーの高さ調整
         actions: [
           IconButton(
-              onPressed: () => context.push('/home_low'),
+              onPressed: () => context.push('/home_high'),
               // onPressed: () => context.push('/home_high'),
               icon: const Icon(Icons.remove)),
           IconButton(
-              onPressed: () => context.push('/home_high'),
+              onPressed: () => context.push('/home'),
               icon: const Icon(Icons.add)),
         ],
       ),
@@ -72,7 +72,7 @@ class HomePage extends StatelessWidget {
                             ),
                             child: const Center(
                               child: Text(
-                                "今日はまだ一回も日光を浴びてないよ！",
+                                "...",
                                 style: TextStyle(
                                     color: Color(0xFF000000), fontSize: 15),
                               ),
@@ -82,7 +82,7 @@ class HomePage extends StatelessWidget {
                             children: [
                               const SizedBox(height: 76),
                               Image.asset(
-                                'assets/sanaec.png',
+                                'assets/img0_s.png',
                                 width: 190.35,
                                 height: 270,
                               ),
@@ -96,7 +96,7 @@ class HomePage extends StatelessWidget {
                       const SizedBox(height: 70),
                       // ダミーの棒グラフ
                       Image.asset(
-                        'assets/graph_0.png',
+                        'assets/graph_2.png',
                         width: 429,
                         height: 263.9,
                       ),
